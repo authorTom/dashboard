@@ -116,7 +116,7 @@ function iconMarkup(link) {
   if (link.icon?.type === 'file') {
     return `<span class="tile__icon"><img src="/icons/${encodeURIComponent(
       link.icon.value
-    )}" alt="" loading="lazy" decoding="async" width="38" height="38"></span>`;
+    )}" alt="" loading="lazy" decoding="async" width="42" height="42"></span>`;
   }
   if (link.icon?.type === 'emoji') {
     return `<span class="tile__icon">${escapeHtml(link.icon.value)}</span>`;

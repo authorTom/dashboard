@@ -449,8 +449,11 @@ body.is-admin .category__edit {
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(224px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
   gap: 12px;
+  /* Tiles in a row share the tallest height, so a two-line description does
+     not leave its neighbours ragged. */
+  align-items: stretch;
 }
 
 /* ------------------------------------------------------------------ tiles */
@@ -459,8 +462,8 @@ body.is-admin .category__edit {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 14px;
+  gap: 13px;
+  padding: 15px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -481,12 +484,12 @@ body.is-admin .category__edit {
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  width: 38px;
-  height: 38px;
-  border-radius: 9px;
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
   overflow: hidden;
   background: var(--accent-soft);
-  font-size: 19px;
+  font-size: 21px;
   line-height: 1;
 }
 
@@ -516,12 +519,17 @@ body.is-admin .category__edit {
 }
 
 .tile__desc {
-  display: block;
   color: var(--text-muted);
   font-size: 13px;
+  line-height: 1.4;
+  /* Wrap to two lines, then ellipsis. Long unbroken URLs are forced to break
+     rather than widening the tile. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .tile__edit {
@@ -832,19 +840,21 @@ select.field__input {
     padding: 22px 16px 56px;
   }
 
+  /* One tile per row on a phone: the description gets the full width rather
+     than being squeezed into a 160px column. */
   .grid {
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
     gap: 10px;
   }
 
   .tile {
-    padding: 12px;
-    gap: 10px;
+    padding: 13px 14px;
+    gap: 12px;
   }
 
   .tile__icon {
-    width: 34px;
-    height: 34px;
+    width: 36px;
+    height: 36px;
   }
 
   .segmented {
