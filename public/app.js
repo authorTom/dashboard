@@ -1,0 +1,632 @@
+/**
+ * Dashboard client.
+ *
+ * The board is rendered once per data change. Search only toggles the `hidden`
+ * attribute on already-rendered tiles, so typing never rebuilds the DOM, and a
+ * small index of lowercased search text is kept alongside each tile element.
+ */
+
+const $ = (selector, root = document) => root.querySelector(selector);
+
+const board = $('#board');
+const searchInput = $('#search');
+const emptyState = $('#empty');
+const noResults = $('#no-results');
+const noResultsTerm = $('#no-results-term');
+const adminBar = $('#admin-bar');
+const adminToggle = $('#admin-toggle');
+const toastEl = $('#toast');
+
+const loginDialog = $('#login-dialog');
+const linkDialog = $('#link-dialog');
+const categoryDialog = $('#category-dialog');
+const confirmDialog = $('#confirm-dialog');
+
+/** categories/links mirror the server; `authed` drives every edit affordance. */
+const state = { categories: [], links: [], authed: false };
+
+/** tile element -> lowercased "title description url" for search. */
+const searchIndex = new Map();
+
+// ------------------------------------------------------------------- helpers
+
+async function api(path, { method = 'GET', body } = {}) {
+  const res = await fetch(`/api${path}`, {
+    method,
+    headers: body ? { 'content-type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  let payload = null;
+  try {
+    payload = await res.json();
+  } catch {
+    // Empty or non-JSON body — fall through to the status check.
+  }
+
+  if (!res.ok) {
+    // The server restarted or the session expired. Without this the UI keeps
+    // showing admin controls that fail on every click, with no way back other
+    // than a manual reload.
+    if (res.status === 401 && !path.startsWith('/auth/')) handleSessionLoss();
+
+    const error = new Error(payload?.error ?? `Request failed (${res.status})`);
+    error.status = res.status;
+    throw error;
+  }
+  return payload;
+}
+
+function handleSessionLoss() {
+  if (!state.authed) return;
+  state.authed = false;
+  render();
+  for (const open of document.querySelectorAll('dialog[open]')) open.close();
+  toast('Session expired — please sign in again', 'error');
+  openDialog(loginDialog);
+}
+
+let toastTimer;
+function toast(message, variant) {
+  toastEl.textContent = message;
+  toastEl.className = variant === 'error' ? 'toast toast--error' : 'toast';
+  toastEl.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toastEl.hidden = true;
+  }, 3200);
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).host.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+}
+
+// --------------------------------------------------------------------- theme
+
+const THEME_KEY = 'dashboard:theme';
+
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') {
+    document.documentElement.dataset.theme = theme;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+applyTheme(localStorage.getItem(THEME_KEY));
+
+$('#theme-toggle').addEventListener('click', () => {
+  const current =
+    document.documentElement.dataset.theme ??
+    (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  const next = current === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  localStorage.setItem(THEME_KEY, next);
+});
+
+// ------------------------------------------------------------------ rendering
+
+const EDIT_ICON = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11.2 2.3l2.5 2.5L5.5 13H3v-2.5z"/></svg>`;
+
+function iconMarkup(link) {
+  if (link.icon?.type === 'file') {
+    return `<span class="tile__icon"><img src="/icons/${encodeURIComponent(
+      link.icon.value
+    )}" alt="" loading="lazy" decoding="async" width="38" height="38"></span>`;
+  }
+  if (link.icon?.type === 'emoji') {
+    return `<span class="tile__icon">${escapeHtml(link.icon.value)}</span>`;
+  }
+  return `<span class="tile__icon tile__icon--letter">${escapeHtml(
+    link.icon?.value ?? '?'
+  )}</span>`;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]
+  );
+}
+
+function buildTile(link) {
+  const tile = document.createElement('a');
+  tile.className = 'tile';
+  tile.href = link.url;
+  tile.target = '_blank';
+  tile.rel = 'noopener noreferrer';
+  tile.dataset.id = link.id;
+
+  const subtitle = link.description || hostOf(link.url);
+  tile.innerHTML = `
+    ${iconMarkup(link)}
+    <span class="tile__body">
+      <span class="tile__title">${escapeHtml(link.title)}</span>
+      <span class="tile__desc">${escapeHtml(subtitle)}</span>
+    </span>
+    <button class="tile__edit" type="button" aria-label="Edit ${escapeHtml(
+      link.title
+    )}">${EDIT_ICON}</button>`;
+
+  searchIndex.set(
+    tile,
+    `${link.title} ${link.description} ${hostOf(link.url)}`.toLowerCase()
+  );
+  return tile;
+}
+
+function render() {
+  document.body.classList.toggle('is-admin', state.authed);
+  adminBar.hidden = !state.authed;
+  adminToggle.textContent = state.authed ? 'Sign out' : 'Sign in';
+
+  searchIndex.clear();
+
+  const fragment = document.createDocumentFragment();
+  const byCategory = new Map(state.categories.map((c) => [c.id, []]));
+  for (const link of state.links) byCategory.get(link.categoryId)?.push(link);
+
+  for (const category of state.categories) {
+    const links = byCategory.get(category.id) ?? [];
+
+    const section = document.createElement('section');
+    section.className = 'category';
+    section.dataset.categoryId = category.id;
+
+    const head = document.createElement('div');
+    head.className = 'category__head';
+    head.innerHTML = `
+      <h2 class="category__name">${escapeHtml(category.name)}</h2>
+      <span class="category__count">${links.length}</span>
+      <button class="category__edit" type="button">Edit</button>`;
+
+    const grid = document.createElement('div');
+    grid.className = 'grid';
+    grid.dataset.categoryId = category.id;
+    for (const link of links) grid.append(buildTile(link));
+
+    section.append(head, grid);
+    fragment.append(section);
+  }
+
+  board.replaceChildren(fragment);
+  board.setAttribute('aria-busy', 'false');
+
+  const isEmpty = state.categories.length === 0 || state.links.length === 0;
+  emptyState.hidden = !isEmpty || Boolean(searchInput.value);
+  applySearch();
+  refreshDropTargets();
+}
+
+// -------------------------------------------------------------------- search
+
+function applySearch() {
+  const term = searchInput.value.trim().toLowerCase();
+  let visible = 0;
+
+  for (const section of board.children) {
+    let shown = 0;
+    for (const tile of section.querySelector('.grid').children) {
+      const match = !term || searchIndex.get(tile)?.includes(term);
+      tile.hidden = !match;
+      if (match) shown += 1;
+    }
+    // Hide a whole category when the filter empties it, but keep empty
+    // categories visible while browsing so they remain drop targets.
+    section.hidden = term ? shown === 0 : false;
+    visible += shown;
+  }
+
+  const searching = Boolean(term);
+  noResults.hidden = !searching || visible > 0;
+  noResultsTerm.textContent = searchInput.value.trim();
+  if (searching) emptyState.hidden = true;
+}
+
+searchInput.addEventListener('input', applySearch);
+
+searchInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    searchInput.value = '';
+    applySearch();
+    searchInput.blur();
+  }
+  if (event.key === 'Enter') {
+    const first = board.querySelector('.tile:not([hidden])');
+    if (first) window.open(first.href, '_blank', 'noopener');
+  }
+});
+
+document.addEventListener('keydown', (event) => {
+  const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName);
+  if (event.key === '/' && !typing && !document.querySelector('dialog[open]')) {
+    event.preventDefault();
+    searchInput.focus();
+  }
+});
+
+// -------------------------------------------------------------------- dialogs
+
+function openDialog(dialog) {
+  hideError(dialog);
+  dialog.showModal();
+}
+
+function showError(dialog, message) {
+  const el = dialog.querySelector('[data-error]');
+  if (!el) return;
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function hideError(dialog) {
+  const el = dialog.querySelector('[data-error]');
+  if (el) el.hidden = true;
+}
+
+for (const dialog of document.querySelectorAll('dialog')) {
+  dialog.querySelector('[data-close]')?.addEventListener('click', () => dialog.close());
+  // Clicking the backdrop closes; clicks inside the form must not bubble here.
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+}
+
+/** Promise-based replacement for window.confirm. */
+function confirmAction({ title, message, confirmLabel = 'Delete' }) {
+  return new Promise((resolve) => {
+    $('[data-title]', confirmDialog).textContent = title;
+    $('[data-message]', confirmDialog).textContent = message;
+    const button = $('[data-confirm]', confirmDialog);
+    button.textContent = confirmLabel;
+
+    const onConfirm = () => {
+      confirmDialog.close();
+      resolve(true);
+    };
+    button.addEventListener('click', onConfirm, { once: true });
+    confirmDialog.addEventListener(
+      'close',
+      () => {
+        button.removeEventListener('click', onConfirm);
+        resolve(false);
+      },
+      { once: true }
+    );
+    confirmDialog.showModal();
+  });
+}
+
+/** Prevents double submits and gives the button a pending label. */
+async function withPending(dialog, fn) {
+  const submit = dialog.querySelector('[data-submit]');
+  const label = submit.textContent;
+  submit.disabled = true;
+  submit.textContent = 'Saving…';
+  try {
+    await fn();
+  } finally {
+    submit.disabled = false;
+    submit.textContent = label;
+  }
+}
+
+// --------------------------------------------------------------------- auth
+
+adminToggle.addEventListener('click', async () => {
+  if (!state.authed) return openDialog(loginDialog);
+
+  await api('/auth/logout', { method: 'POST' });
+  state.authed = false;
+  render();
+  toast('Signed out');
+});
+
+$('[data-form="login"]', loginDialog).addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const password = $('#login-password').value;
+
+  await withPending(loginDialog, async () => {
+    try {
+      await api('/auth/login', { method: 'POST', body: { password } });
+      state.authed = true;
+      loginDialog.close();
+      $('#login-password').value = '';
+      render();
+      toast('Signed in');
+    } catch (err) {
+      showError(loginDialog, err.message);
+    }
+  });
+});
+
+// ---------------------------------------------------------------- link form
+
+const linkForm = $('[data-form="link"]', linkDialog);
+const iconValueInput = linkForm.elements.iconValue;
+const iconNote = $('[data-icon-note]', linkForm);
+
+const ICON_HINTS = {
+  auto: { note: 'Fetched from the site automatically.', placeholder: '' },
+  emoji: { note: 'Any single emoji or character.', placeholder: '🎬' },
+  url: { note: 'Downloaded once and served from this dashboard.', placeholder: 'https://…/icon.png' },
+  none: { note: 'Uses the first letter of the name.', placeholder: '' },
+};
+
+function syncIconMode() {
+  const mode = linkForm.elements.iconMode.value;
+  const hint = ICON_HINTS[mode];
+  const needsValue = mode === 'emoji' || mode === 'url';
+  iconValueInput.hidden = !needsValue;
+  iconValueInput.required = needsValue;
+  iconValueInput.placeholder = hint.placeholder;
+  iconNote.textContent = hint.note;
+}
+
+for (const radio of linkForm.elements.iconMode) {
+  radio.addEventListener('change', syncIconMode);
+}
+
+/** `link` is null when adding. */
+function openLinkDialog(link) {
+  const select = linkForm.elements.categoryId;
+  select.replaceChildren(
+    ...state.categories.map((c) => new Option(c.name, c.id))
+  );
+
+  $('[data-title]', linkForm).textContent = link ? 'Edit link' : 'Add link';
+  linkForm.elements.title.value = link?.title ?? '';
+  linkForm.elements.url.value = link?.url ?? '';
+  linkForm.elements.description.value = link?.description ?? '';
+  select.value = link?.categoryId ?? state.categories[0]?.id ?? '';
+
+  // Editing starts on "Automatic" but only refetches if the admin touches it.
+  linkForm.elements.iconMode.value = link?.icon?.type === 'emoji' ? 'emoji' : 'auto';
+  iconValueInput.value = link?.icon?.type === 'emoji' ? link.icon.value : '';
+  syncIconMode();
+  if (link) iconNote.textContent = 'Leave as-is to keep the current icon.';
+
+  const del = $('[data-delete]', linkForm);
+  del.hidden = !link;
+  linkForm.dataset.editing = link?.id ?? '';
+
+  openDialog(linkDialog);
+  linkForm.elements.title.focus();
+}
+
+linkForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const id = linkForm.dataset.editing;
+  const mode = linkForm.elements.iconMode.value;
+
+  const body = {
+    title: linkForm.elements.title.value,
+    url: linkForm.elements.url.value,
+    description: linkForm.elements.description.value,
+    categoryId: linkForm.elements.categoryId.value,
+  };
+
+  // Omitting `icon` on an edit tells the server to keep the existing one.
+  const iconTouched = !id || mode !== 'auto' || linkForm.dataset.iconTouched === '1';
+  if (iconTouched) body.icon = { mode, value: iconValueInput.value };
+
+  await withPending(linkDialog, async () => {
+    try {
+      await api(id ? `/links/${id}` : '/links', {
+        method: id ? 'PUT' : 'POST',
+        body,
+      });
+      linkDialog.close();
+      await refresh();
+      toast(id ? 'Link updated' : 'Link added');
+    } catch (err) {
+      showError(linkDialog, err.message);
+    }
+  });
+});
+
+// Any deliberate icon change marks the icon as touched for the next save.
+linkForm.addEventListener('change', (event) => {
+  if (event.target.name === 'iconMode' || event.target.name === 'iconValue') {
+    linkForm.dataset.iconTouched = '1';
+  }
+});
+linkDialog.addEventListener('close', () => {
+  linkForm.dataset.iconTouched = '0';
+});
+
+$('[data-delete]', linkForm).addEventListener('click', async () => {
+  const id = linkForm.dataset.editing;
+  const link = state.links.find((l) => l.id === id);
+  if (!link) return;
+
+  const ok = await confirmAction({
+    title: 'Delete link',
+    message: `“${link.title}” will be removed from the dashboard.`,
+  });
+  if (!ok) return;
+
+  try {
+    await api(`/links/${id}`, { method: 'DELETE' });
+    linkDialog.close();
+    await refresh();
+    toast('Link deleted');
+  } catch (err) {
+    showError(linkDialog, err.message);
+  }
+});
+
+$('#add-link').addEventListener('click', () => {
+  if (state.categories.length === 0) {
+    return toast('Create a category first', 'error');
+  }
+  openLinkDialog(null);
+});
+
+// ------------------------------------------------------------ category form
+
+const categoryForm = $('[data-form="category"]', categoryDialog);
+
+function openCategoryDialog(category) {
+  $('[data-title]', categoryForm).textContent = category
+    ? 'Rename category'
+    : 'New category';
+  categoryForm.elements.name.value = category?.name ?? '';
+  $('[data-delete]', categoryForm).hidden = !category;
+  categoryForm.dataset.editing = category?.id ?? '';
+
+  openDialog(categoryDialog);
+  categoryForm.elements.name.focus();
+}
+
+categoryForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const id = categoryForm.dataset.editing;
+  const body = { name: categoryForm.elements.name.value };
+
+  await withPending(categoryDialog, async () => {
+    try {
+      await api(id ? `/categories/${id}` : '/categories', {
+        method: id ? 'PUT' : 'POST',
+        body,
+      });
+      categoryDialog.close();
+      await refresh();
+      toast(id ? 'Category renamed' : 'Category added');
+    } catch (err) {
+      showError(categoryDialog, err.message);
+    }
+  });
+});
+
+$('[data-delete]', categoryForm).addEventListener('click', async () => {
+  const id = categoryForm.dataset.editing;
+  const category = state.categories.find((c) => c.id === id);
+  if (!category) return;
+
+  const count = state.links.filter((l) => l.categoryId === id).length;
+  const ok = await confirmAction({
+    title: 'Delete category',
+    message: count
+      ? `“${category.name}” and its ${count} link${count === 1 ? '' : 's'} will be deleted.`
+      : `“${category.name}” will be deleted.`,
+  });
+  if (!ok) return;
+
+  try {
+    await api(`/categories/${id}`, { method: 'DELETE' });
+    categoryDialog.close();
+    await refresh();
+    toast('Category deleted');
+  } catch (err) {
+    showError(categoryDialog, err.message);
+  }
+});
+
+$('#add-category').addEventListener('click', () => openCategoryDialog(null));
+
+// ------------------------------------------------------- board interactions
+
+board.addEventListener('click', (event) => {
+  const editTile = event.target.closest('.tile__edit');
+  if (editTile) {
+    event.preventDefault();
+    const id = editTile.closest('.tile').dataset.id;
+    const link = state.links.find((l) => l.id === id);
+    if (link) openLinkDialog(link);
+    return;
+  }
+
+  const editCategory = event.target.closest('.category__edit');
+  if (editCategory) {
+    const id = editCategory.closest('.category').dataset.categoryId;
+    const category = state.categories.find((c) => c.id === id);
+    if (category) openCategoryDialog(category);
+  }
+});
+
+// ----------------------------------------------------------- drag to reorder
+
+let dragged = null;
+
+function refreshDropTargets() {
+  for (const tile of board.querySelectorAll('.tile')) {
+    tile.draggable = state.authed;
+  }
+  for (const grid of board.querySelectorAll('.grid')) {
+    grid.classList.toggle('is-empty-target', state.authed && grid.children.length === 0);
+  }
+}
+
+board.addEventListener('dragstart', (event) => {
+  const tile = event.target.closest('.tile');
+  if (!tile || !state.authed) return;
+  dragged = tile;
+  tile.classList.add('is-dragging');
+  event.dataTransfer.effectAllowed = 'move';
+  // Firefox refuses to start a drag without data on the transfer.
+  event.dataTransfer.setData('text/plain', tile.dataset.id);
+});
+
+board.addEventListener('dragover', (event) => {
+  if (!dragged) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+
+  const grid = event.target.closest('.grid');
+  if (!grid) return;
+
+  const target = event.target.closest('.tile');
+  if (!target || target === dragged) {
+    if (!target) grid.append(dragged);
+    return;
+  }
+
+  // Insert before or after the hovered tile depending on which half the
+  // pointer is in, so the placeholder tracks the cursor naturally.
+  const box = target.getBoundingClientRect();
+  const after = event.clientX > box.left + box.width / 2;
+  target.parentNode.insertBefore(dragged, after ? target.nextSibling : target);
+});
+
+board.addEventListener('drop', (event) => {
+  if (dragged) event.preventDefault();
+});
+
+board.addEventListener('dragend', async () => {
+  if (!dragged) return;
+  dragged.classList.remove('is-dragging');
+  dragged = null;
+
+  const linkOrder = {};
+  for (const grid of board.querySelectorAll('.grid')) {
+    linkOrder[grid.dataset.categoryId] = [...grid.children].map((t) => t.dataset.id);
+  }
+  const categoryOrder = [...board.children].map((s) => s.dataset.categoryId);
+
+  try {
+    const next = await api('/reorder', { method: 'POST', body: { categoryOrder, linkOrder } });
+    Object.assign(state, next);
+    refreshDropTargets();
+  } catch (err) {
+    toast(err.message, 'error');
+    await refresh(); // Snap back to the server's truth.
+  }
+});
+
+// ---------------------------------------------------------------- lifecycle
+
+async function refresh() {
+  const next = await api('/state');
+  Object.assign(state, next);
+  render();
+}
+
+refresh().catch((err) => {
+  board.setAttribute('aria-busy', 'false');
+  toast(`Could not load dashboard: ${err.message}`, 'error');
+});

@@ -1,0 +1,59 @@
+# Dashboard — Docker Compose
+#
+# Production (pull the prebuilt image):
+#   docker compose up -d            -> http://localhost:8080
+#
+# Build from a source checkout instead:
+#   docker compose up -d --build
+#
+# Compose reads a sibling ".env" automatically for the ${...} values below.
+# Copy .env.example to .env and set ADMIN_PASSWORD before the first run.
+
+services:
+  web:
+    # Multi-arch image published by .github/workflows/docker.yml on every push
+    # to main. GHCR lowercases the owner (authorTom -> authortom).
+    image: ${DASHBOARD_IMAGE:-ghcr.io/authortom/dashboard:latest}
+
+    # --- Build from source instead of pulling (optional) ------------------
+    # Requires the full repo checkout on the host. Uncomment and run
+    # `docker compose up -d --build` to build locally rather than pull.
+    # build:
+    #   context: .
+
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
+    init: true                 # PID 1 signal forwarding + zombie reaping
+    restart: unless-stopped
+
+    environment:
+      # Password for the admin area. There is no default and no way to recover
+      # it — Compose refuses to start if it is unset.
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}"
+      # Set to 1 when a TLS-terminating proxy sits in front of this, so the
+      # session cookie is marked Secure.
+      SECURE_COOKIES: "${SECURE_COOKIES:-0}"
+      # Number of reverse proxies in front of the container. Leave empty when
+      # clients reach it directly: setting it makes the server believe
+      # X-Forwarded-For, which a direct client can forge to defeat the login
+      # rate limit.
+      TRUST_PROXY: "${TRUST_PROXY:-}"
+
+    volumes:
+      # links.json and the cached favicons. A named volume survives
+      # `docker compose down` and image upgrades; swap in a host path
+      # (e.g. ./data:/data) to keep them somewhere you can back up directly —
+      # the host directory must be writable by uid 1000.
+      - dashboard-data:/data
+
+    healthcheck:
+      # Array (exec) form keeps the "://" and ":8080" out of YAML's way. busybox
+      # wget ships in the node-alpine runtime image; the slim image has no curl.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  dashboard-data:
