@@ -16,6 +16,8 @@ const MAX_ICON_BYTES = 256 * 1024;
 const MAX_HTML_BYTES = 128 * 1024;
 const GC_GRACE_MS = 60 * 1000;
 
+export const MAX_UPLOAD_BYTES = 512 * 1024;
+
 const MIME_EXT = new Map([
   ['image/png', 'png'],
   ['image/x-icon', 'ico'],
@@ -25,6 +27,17 @@ const MIME_EXT = new Map([
   ['image/gif', 'gif'],
   ['image/webp', 'webp'],
 ]);
+
+/** What an admin may upload by hand. A subset of MIME_EXT, by design. */
+const UPLOAD_MIME_EXT = new Map([
+  ['image/png', 'png'],
+  ['image/jpeg', 'jpg'],
+  ['image/gif', 'gif'],
+  ['image/svg+xml', 'svg'],
+]);
+
+/** Content-addressed names written by save(). Nothing else may be referenced. */
+const CACHED_NAME = /^[0-9a-f]{32}\.(png|jpg|gif|svg|ico|webp)$/;
 
 export async function init() {
   await fs.mkdir(ICON_DIR, { recursive: true });
@@ -153,6 +166,103 @@ export async function cacheFromUrl(iconUrl) {
   return name ? { type: 'file', value: name } : null;
 }
 
+// ------------------------------------------------------------------ uploads
+
+/** Content types the upload endpoint accepts, for express.raw(). */
+export function uploadTypes() {
+  return [...UPLOAD_MIME_EXT.keys()];
+}
+
+/**
+ * An SVG is the one upload that is also a document: served from /icons it is
+ * same-origin, so a hostile one could try to script. The page CSP already
+ * blocks inline script, but an icon has no legitimate need for any of this,
+ * so anything active is rejected outright rather than stripped.
+ */
+const SVG_FORBIDDEN = [
+  [/<\s*script/i, 'scripts'],
+  [/<\s*foreignObject/i, 'embedded HTML'],
+  [/<\s*(iframe|embed|object|animate|set)\b/i, 'embedded or animated content'],
+  [/\son[a-z]+\s*=/i, 'event handlers'],
+  [/(href|xlink:href|src)\s*=\s*["']?\s*(javascript|data:text\/html)/i, 'script URLs'],
+  [/<!ENTITY/i, 'entity definitions'],
+];
+
+function checkSvg(buffer) {
+  const text = buffer.toString('utf8');
+  if (!/<svg[\s>]/i.test(text)) return 'That file is not a valid SVG.';
+  for (const [pattern, what] of SVG_FORBIDDEN) {
+    if (pattern.test(text)) return `That SVG contains ${what}, which is not allowed in an icon.`;
+  }
+  return null;
+}
+
+/** Guards against a mislabelled — or disguised — upload. */
+function checkMagic(ext, buffer) {
+  if (ext === 'png') {
+    return buffer.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
+  }
+  if (ext === 'jpg') {
+    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+  if (ext === 'gif') {
+    return /^GIF8[79]a$/.test(buffer.subarray(0, 6).toString('latin1'));
+  }
+  return true; // SVG is text; checkSvg() covers it.
+}
+
+/**
+ * Stores a PNG, JPG, GIF or SVG the admin uploaded. Returns
+ * { icon } on success or { error } with a message fit to show them.
+ */
+export async function saveUpload(buffer, contentType) {
+  const type = (contentType ?? '').split(';')[0].trim().toLowerCase();
+  const ext = UPLOAD_MIME_EXT.get(type);
+  if (!ext) return { error: 'Icons must be a PNG, JPG, GIF or SVG.' };
+
+  if (!Buffer.isBuffer(buffer) || buffer.byteLength === 0) {
+    return { error: 'That file is empty.' };
+  }
+  if (buffer.byteLength > MAX_UPLOAD_BYTES) {
+    return { error: `Icons must be ${Math.round(MAX_UPLOAD_BYTES / 1024)} kB or smaller.` };
+  }
+  if (!checkMagic(ext, buffer)) {
+    return { error: `That file is not really a ${ext === 'jpg' ? 'JPG' : ext.toUpperCase()}.` };
+  }
+  if (ext === 'svg') {
+    const problem = checkSvg(buffer);
+    if (problem) return { error: problem };
+  }
+
+  const name = await save(buffer, type);
+  if (!name) return { error: 'Could not store that icon.' };
+  reserve(name);
+  return { icon: { type: 'file', value: name } };
+}
+
+/**
+ * Uploads land on disk before the link that references them is saved, so the
+ * collector has to be told to leave them alone in between — the admin may sit
+ * on a half-filled form for a while, and an unrelated edit runs a GC pass.
+ */
+const RESERVE_MS = 30 * 60 * 1000;
+const reserved = new Map(); // name -> expiry
+
+function reserve(name) {
+  reserved.set(name, Date.now() + RESERVE_MS);
+}
+
+/** True if `name` is one of our cached icons and still on disk. */
+export async function isCached(name) {
+  if (typeof name !== 'string' || !CACHED_NAME.test(name)) return false;
+  try {
+    await fs.access(path.join(ICON_DIR, name));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Deletes cached icons no link references any more. Runs after deletes and
  * edits so data/icons/ cannot grow without bound.
@@ -162,6 +272,11 @@ export async function collectGarbage(links) {
     links.filter((l) => l.icon?.type === 'file').map((l) => l.icon.value)
   );
   const now = Date.now();
+
+  for (const [name, expiry] of reserved) {
+    if (expiry <= now) reserved.delete(name);
+    else inUse.add(name);
+  }
 
   try {
     const files = await fs.readdir(ICON_DIR);

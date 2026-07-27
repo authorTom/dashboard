@@ -73,17 +73,24 @@ result, `Esc` clears the box.
 (`nas`, `example.com`, `192.168.1.10:8006`) and is upgraded to `https://` if you
 omit the scheme.
 
-**Icons** — four options per link:
+**Icons** — five options per link:
 
 - *Automatic* reads the site's `<link rel="icon">` tags, falling back to
   `/favicon.ico`. Whatever it finds is downloaded once and cached in
   `data/icons/`, so loading the dashboard never makes an external request.
 - *Emoji* uses any character you type.
 - *Image URL* downloads an image you point at and caches it the same way.
+- *Upload* takes a PNG, JPG, GIF or SVG from your machine — click the box or
+  drop a file onto it. Up to 512 kB. Editing a link and leaving *Upload* empty
+  keeps the icon it already has.
 - *Letter* draws a monogram from the link's name.
 
 Automatic fetching is best-effort. If a service is unreachable or serves no
 icon, the link silently falls back to a monogram — the save still succeeds.
+
+Uploads are checked against the file's actual bytes, not its name, so a
+mislabelled file is rejected. SVGs additionally have to be inert: one carrying
+scripts, event handlers or embedded content is refused rather than sanitised.
 
 **Reordering** — in admin mode, drag any tile. Drop it inside its own category
 to reorder, or onto another category to move it there. The new order is saved
@@ -96,9 +103,10 @@ as soon as you release.
 Everything lives in `data/` (`/data` in the container):
 
 - `links.json` — categories and links. Human-readable; back it up by copying it.
-- `icons/` — cached favicons, named by content hash. Safe to delete; icons are
-  re-fetched next time you save a link. Unreferenced files are pruned
-  automatically whenever a link or category is edited or removed.
+- `icons/` — cached favicons and uploaded icons, named by content hash. Safe to
+  delete, though uploads are gone for good; fetched icons come back next time
+  you save a link. Unreferenced files are pruned automatically whenever a link
+  or category is edited or removed.
 
 Writes go to a temporary file and are renamed into place, so an unexpected
 shutdown cannot leave a half-written `links.json`. Concurrent writes are
@@ -157,7 +165,7 @@ WantedBy=multi-user.target
 server.js            Express bootstrap, security headers, graceful shutdown
 src/store.js         In-memory state + atomic JSON persistence
 src/auth.js          Password hashing, sessions, rate limiting
-src/icons.js         Favicon discovery, caching, garbage collection
+src/icons.js         Favicon discovery, uploads, caching, garbage collection
 src/static.js        Pre-gzipped asset cache
 src/routes/api.js    REST API and input validation
 public/              index.html, app.js, styles.css
@@ -175,6 +183,7 @@ Reads are public; every write requires the session cookie.
 | `GET`    | `/api/state`           | Categories, links, auth status   |
 | `POST`   | `/api/auth/login`      | `{ password }` → session cookie  |
 | `POST`   | `/api/auth/logout`     | Clear the session                |
+| `POST`   | `/api/icons`           | Upload an icon — raw image bytes as the body, `Content-Type` set to `image/png`, `image/jpeg`, `image/gif` or `image/svg+xml`. Returns the cached name to pass as `icon: { mode: "upload", value }` |
 | `POST`   | `/api/links`           | Create a link                    |
 | `PUT`    | `/api/links/:id`       | Update a link                    |
 | `DELETE` | `/api/links/:id`       | Delete a link                    |

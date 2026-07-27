@@ -153,6 +153,10 @@
               <span>Image URL</span>
             </label>
             <label class="segmented__option">
+              <input type="radio" name="iconMode" value="upload" />
+              <span>Upload</span>
+            </label>
+            <label class="segmented__option">
               <input type="radio" name="iconMode" value="none" />
               <span>Letter</span>
             </label>
@@ -165,6 +169,29 @@
             autocomplete="off"
             hidden
           />
+
+          <div class="upload" data-upload hidden>
+            <label class="upload__drop" data-upload-drop>
+              <input
+                type="file"
+                name="iconFile"
+                accept="image/png,image/jpeg,image/gif,image/svg+xml,.png,.jpg,.jpeg,.gif,.svg"
+              />
+              <img class="upload__preview" data-upload-preview alt="" hidden />
+              <span class="upload__text" data-upload-text>
+                <strong>Choose a file</strong> or drop one here
+              </span>
+            </label>
+            <button
+              class="upload__clear"
+              type="button"
+              data-upload-clear
+              hidden
+            >
+              Remove
+            </button>
+          </div>
+
           <p class="field__note" data-icon-note>Fetched from the site automatically.</p>
         </fieldset>
 

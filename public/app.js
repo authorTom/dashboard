@@ -350,10 +350,18 @@ const linkForm = $('[data-form="link"]', linkDialog);
 const iconValueInput = linkForm.elements.iconValue;
 const iconNote = $('[data-icon-note]', linkForm);
 
+const uploadPanel = $('[data-upload]', linkForm);
+const uploadDrop = $('[data-upload-drop]', linkForm);
+const uploadInput = linkForm.elements.iconFile;
+const uploadPreview = $('[data-upload-preview]', linkForm);
+const uploadText = $('[data-upload-text]', linkForm);
+const uploadClear = $('[data-upload-clear]', linkForm);
+
 const ICON_HINTS = {
   auto: { note: 'Fetched from the site automatically.', placeholder: '' },
   emoji: { note: 'Any single emoji or character.', placeholder: '🎬' },
   url: { note: 'Downloaded once and served from this dashboard.', placeholder: 'https://…/icon.png' },
+  upload: { note: 'PNG, JPG, GIF or SVG, up to 512 kB.', placeholder: '' },
   none: { note: 'Uses the first letter of the name.', placeholder: '' },
 };
 
@@ -364,11 +372,132 @@ function syncIconMode() {
   iconValueInput.hidden = !needsValue;
   iconValueInput.required = needsValue;
   iconValueInput.placeholder = hint.placeholder;
+  uploadPanel.hidden = mode !== 'upload';
   iconNote.textContent = hint.note;
 }
 
 for (const radio of linkForm.elements.iconMode) {
   radio.addEventListener('change', syncIconMode);
+}
+
+// -------------------------------------------------------------- icon upload
+
+const MAX_UPLOAD_BYTES = 512 * 1024; // Matches the server's limit.
+const CHOOSE_TEXT = '<strong>Choose a file</strong> or drop one here';
+const EXT_TYPES = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  svg: 'image/svg+xml',
+};
+const UPLOAD_TYPES = new Set(Object.values(EXT_TYPES));
+
+/** The icon the link being edited already has, so it can be shown and kept. */
+let currentIconSrc = null;
+
+/**
+ * Some platforms hand over an empty or generic type — notably for SVG — so
+ * the extension is the fallback. The server checks the bytes regardless.
+ */
+function uploadType(file) {
+  if (UPLOAD_TYPES.has(file.type)) return file.type;
+  return EXT_TYPES[file.name.split('.').pop()?.toLowerCase()] ?? null;
+}
+
+function resetUpload() {
+  uploadInput.value = '';
+  uploadClear.hidden = true;
+  if (currentIconSrc) {
+    uploadPreview.src = currentIconSrc;
+    uploadPreview.hidden = false;
+    uploadText.textContent = 'Current icon — choose a file to replace it.';
+  } else {
+    uploadPreview.hidden = true;
+    uploadPreview.removeAttribute('src');
+    uploadText.innerHTML = CHOOSE_TEXT;
+  }
+}
+
+function showChosenFile(file) {
+  // A data URL keeps the preview inside the page's img-src CSP, and the file
+  // is capped at 512 kB, so reading it whole costs nothing worth measuring.
+  const reader = new FileReader();
+  reader.onload = () => {
+    uploadPreview.src = reader.result;
+    uploadPreview.hidden = false;
+  };
+  reader.readAsDataURL(file);
+  uploadText.textContent = file.name;
+  uploadClear.hidden = false;
+}
+
+uploadInput.addEventListener('change', () => {
+  const file = uploadInput.files?.[0];
+  if (!file) return resetUpload();
+
+  if (!uploadType(file)) {
+    resetUpload();
+    return showError(linkDialog, 'Icons must be a PNG, JPG, GIF or SVG.');
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    resetUpload();
+    return showError(linkDialog, 'That image is larger than 512 kB.');
+  }
+
+  hideError(linkDialog);
+  showChosenFile(file);
+});
+
+uploadClear.addEventListener('click', () => {
+  resetUpload();
+  hideError(linkDialog);
+});
+
+uploadDrop.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  uploadDrop.classList.add('is-dropping');
+});
+
+uploadDrop.addEventListener('dragleave', () => {
+  uploadDrop.classList.remove('is-dropping');
+});
+
+uploadDrop.addEventListener('drop', (event) => {
+  event.preventDefault();
+  uploadDrop.classList.remove('is-dropping');
+
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+
+  // Route the drop through the input so selection and validation have one path.
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  uploadInput.files = transfer.files;
+  uploadInput.dispatchEvent(new Event('change', { bubbles: true }));
+});
+
+/** Stores the file and returns the cached name to attach to the link. */
+async function uploadIcon(file) {
+  const res = await fetch('/api/icons', {
+    method: 'POST',
+    headers: { 'content-type': uploadType(file) },
+    body: file,
+  });
+
+  let payload = null;
+  try {
+    payload = await res.json();
+  } catch {
+    // Non-JSON body — the status check below still reports something useful.
+  }
+
+  if (!res.ok) {
+    if (res.status === 401) handleSessionLoss();
+    if (res.status === 413) throw new Error('That image is larger than 512 kB.');
+    throw new Error(payload?.error ?? `Could not upload that image (${res.status})`);
+  }
+  return payload.icon.value;
 }
 
 /** `link` is null when adding. */
@@ -387,6 +516,9 @@ function openLinkDialog(link) {
   // Editing starts on "Automatic" but only refetches if the admin touches it.
   linkForm.elements.iconMode.value = link?.icon?.type === 'emoji' ? 'emoji' : 'auto';
   iconValueInput.value = link?.icon?.type === 'emoji' ? link.icon.value : '';
+  currentIconSrc =
+    link?.icon?.type === 'file' ? `/icons/${encodeURIComponent(link.icon.value)}` : null;
+  resetUpload();
   syncIconMode();
   if (link) iconNote.textContent = 'Leave as-is to keep the current icon.';
 
@@ -402,6 +534,11 @@ linkForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const id = linkForm.dataset.editing;
   const mode = linkForm.elements.iconMode.value;
+  const file = mode === 'upload' ? (uploadInput.files?.[0] ?? null) : null;
+
+  if (mode === 'upload' && !file && !currentIconSrc) {
+    return showError(linkDialog, 'Choose an image to upload, or pick another icon option.');
+  }
 
   const body = {
     title: linkForm.elements.title.value,
@@ -410,12 +547,16 @@ linkForm.addEventListener('submit', async (event) => {
     categoryId: linkForm.elements.categoryId.value,
   };
 
-  // Omitting `icon` on an edit tells the server to keep the existing one.
-  const iconTouched = !id || mode !== 'auto' || linkForm.dataset.iconTouched === '1';
-  if (iconTouched) body.icon = { mode, value: iconValueInput.value };
-
   await withPending(linkDialog, async () => {
     try {
+      // Omitting `icon` on an edit tells the server to keep the existing one —
+      // which is also how "Upload" with no new file keeps the current image.
+      if (mode === 'upload') {
+        if (file) body.icon = { mode, value: await uploadIcon(file) };
+      } else if (!id || mode !== 'auto' || linkForm.dataset.iconTouched === '1') {
+        body.icon = { mode, value: iconValueInput.value };
+      }
+
       await api(id ? `/links/${id}` : '/links', {
         method: id ? 'PUT' : 'POST',
         body,
@@ -431,12 +572,14 @@ linkForm.addEventListener('submit', async (event) => {
 
 // Any deliberate icon change marks the icon as touched for the next save.
 linkForm.addEventListener('change', (event) => {
-  if (event.target.name === 'iconMode' || event.target.name === 'iconValue') {
+  if (/^icon(Mode|Value|File)$/.test(event.target.name)) {
     linkForm.dataset.iconTouched = '1';
   }
 });
 linkDialog.addEventListener('close', () => {
   linkForm.dataset.iconTouched = '0';
+  currentIconSrc = null;
+  resetUpload();
 });
 
 $('[data-delete]', linkForm).addEventListener('click', async () => {

@@ -76,6 +76,16 @@ async function resolveIcon(input, { url, title }) {
     return (await icons.cacheFromUrl(iconUrl)) ?? monogram(title);
   }
 
+  // The file itself went to POST /api/icons; what arrives here is the cached
+  // name that call handed back. Re-check it: it decides a path under /icons.
+  if (mode === 'upload') {
+    const value = str(input.value, 'Icon', { max: 64 });
+    if (!(await icons.isCached(value))) {
+      throw new ValidationError('That uploaded icon is no longer available — choose the file again.');
+    }
+    return { type: 'file', value };
+  }
+
   if (mode === 'none') return monogram(title);
 
   return (await icons.fetchFavicon(url)) ?? monogram(title);
@@ -164,6 +174,27 @@ router.delete(
     if (!removed) return res.status(404).json({ error: 'Category not found.' });
     await icons.collectGarbage(store.snapshot().links);
     res.json({ removed: removed.links.length });
+  })
+);
+
+// ---------------------------------------------------------------------- icons
+
+/**
+ * Takes the raw image bytes as the request body — no multipart parser, and so
+ * no dependency, for a single-file upload. The response carries the cached
+ * name, which the client then sends back as the link's icon.
+ */
+router.post(
+  '/icons',
+  auth.requireAuth,
+  express.raw({ type: icons.uploadTypes(), limit: icons.MAX_UPLOAD_BYTES }),
+  handle(async (req, res) => {
+    if (!Buffer.isBuffer(req.body)) {
+      return res.status(415).json({ error: 'Icons must be a PNG, JPG, GIF or SVG.' });
+    }
+    const { icon, error } = await icons.saveUpload(req.body, req.get('content-type'));
+    if (error) return res.status(400).json({ error });
+    res.status(201).json({ icon });
   })
 );
 
