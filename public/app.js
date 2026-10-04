@@ -24,6 +24,56 @@ const confirmDialog = $('#confirm-dialog');
 
 /** categories/links mirror the server; `authed` drives every edit affordance. */
 const state = { categories: [], links: [], authed: false };
+let selectedCategory = null;
+const categoryNav = $('#category-nav');
+
+function renderNavigation() {
+  if (!state.categories.some((c) => c.id === selectedCategory)) selectedCategory = null;
+  const items = [{ id: null, name: 'All services', count: state.links.length },
+    ...state.categories.map((c) => ({ ...c, count: state.links.filter((l) => l.categoryId === c.id).length }))];
+  categoryNav.replaceChildren(...items.map((item) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'nav-item';
+    button.dataset.categoryId = item.id ?? '';
+    button.setAttribute('aria-pressed', String(item.id === selectedCategory));
+    button.innerHTML = `<span class="nav-item__mark" aria-hidden="true">${item.id === null ? '⊞' : '▦'}</span><span class="nav-item__name">${escapeHtml(item.name)}</span><span class="nav-item__count">${item.count}</span>`;
+    return button;
+  }));
+  $('#service-count').textContent = state.links.length;
+  $('#collection-count').textContent = state.categories.length;
+}
+
+categoryNav.addEventListener('click', (event) => {
+  const button = event.target.closest('button');
+  if (!button) return;
+  selectedCategory = button.dataset.categoryId || null;
+  // Keep the focused button in place for keyboard and assistive-tech users.
+  for (const item of categoryNav.children) {
+    item.setAttribute('aria-pressed', String((item.dataset.categoryId || null) === selectedCategory));
+  }
+  applySearch();
+});
+
+const VIEW_KEY = 'dashboard:view';
+function applyView(view) {
+  const list = view === 'list';
+  board.classList.toggle('board--list', list);
+  $('#view-grid').setAttribute('aria-pressed', String(!list));
+  $('#view-list').setAttribute('aria-pressed', String(list));
+}
+applyView(localStorage.getItem(VIEW_KEY));
+for (const view of ['grid', 'list']) {
+  $(`#view-${view}`).addEventListener('click', () => {
+    applyView(view);
+    localStorage.setItem(VIEW_KEY, view);
+  });
+}
+$('#clear-search').addEventListener('click', () => {
+  searchInput.value = '';
+  applySearch();
+  searchInput.focus();
+});
 
 /** tile element -> lowercased "title description url" for search. */
 const searchIndex = new Map();
@@ -147,7 +197,9 @@ function buildTile(link) {
     <span class="tile__body">
       <span class="tile__title">${escapeHtml(link.title)}</span>
       <span class="tile__desc">${escapeHtml(subtitle)}</span>
+      <span class="tile__host">${escapeHtml(hostOf(link.url))}</span>
     </span>
+    <span class="tile__launch" aria-hidden="true">↗</span>
     <button class="tile__edit" type="button" aria-label="Edit ${escapeHtml(
       link.title
     )}">${EDIT_ICON}</button>`;
@@ -164,6 +216,7 @@ function render() {
   adminBar.hidden = !state.authed;
   adminToggle.textContent = state.authed ? 'Sign out' : 'Sign in';
 
+  renderNavigation();
   searchIndex.clear();
 
   const fragment = document.createDocumentFragment();
@@ -211,13 +264,15 @@ function applySearch() {
   for (const section of board.children) {
     let shown = 0;
     for (const tile of section.querySelector('.grid').children) {
-      const match = !term || searchIndex.get(tile)?.includes(term);
+      const inCategory = !selectedCategory || section.dataset.categoryId === selectedCategory;
+      const match = inCategory && (!term || searchIndex.get(tile)?.includes(term));
       tile.hidden = !match;
       if (match) shown += 1;
     }
     // Hide a whole category when the filter empties it, but keep empty
     // categories visible while browsing so they remain drop targets.
-    section.hidden = term ? shown === 0 : false;
+    section.hidden = (selectedCategory && section.dataset.categoryId !== selectedCategory) || (term ? shown === 0 : false);
+    section.querySelector('.category__count').textContent = shown;
     visible += shown;
   }
 
@@ -225,6 +280,11 @@ function applySearch() {
   noResults.hidden = !searching || visible > 0;
   noResultsTerm.textContent = searchInput.value.trim();
   if (searching) emptyState.hidden = true;
+  else emptyState.hidden = state.links.length > 0 && state.categories.length > 0;
+  $('#clear-search').hidden = !searchInput.value;
+  const categoryName = state.categories.find((c) => c.id === selectedCategory)?.name;
+  $('#collection-title').textContent = categoryName ?? 'All services';
+  $('#results-summary').textContent = `${visible} service${visible === 1 ? '' : 's'}${searching ? ' matching your search' : ' in your workspace'}`;
 }
 
 searchInput.addEventListener('input', applySearch);
@@ -754,7 +814,7 @@ board.addEventListener('dragend', async () => {
   try {
     const next = await api('/reorder', { method: 'POST', body: { categoryOrder, linkOrder } });
     Object.assign(state, next);
-    refreshDropTargets();
+    render();
   } catch (err) {
     toast(err.message, 'error');
     await refresh(); // Snap back to the server's truth.
